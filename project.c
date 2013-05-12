@@ -9,6 +9,8 @@
 
 #define HEADER_TYPE_VERSION "version\0\0\0\0\0"
 #define HEADER_TYPE_VERACK "verack\0\0\0\0\0\0"
+#define HEADER_TYPE_GETADDR "getaddr\0\0\0\0\0"
+#define HEADER_TYPE_ADDR "addr\0\0\0\0\0\0\0\0"
 
 typedef enum{
     CB_MESSAGE_HEADER_NETWORK_ID = 0, /**< The network identidier bytes */
@@ -28,15 +30,26 @@ void buildHeaderAndChecksum(char* header, CBMessage* message, char* type)
 	uint8_t hash[32];
 	uint8_t hash2[32];
 	memcpy(header + CB_MESSAGE_HEADER_TYPE, type, 12);
-	CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
-        CBSha256(hash, 32, hash2);
-        message->checksum[0] = hash2[0];
-        message->checksum[1] = hash2[1];
-        message->checksum[2] = hash2[2];
-        message->checksum[3] = hash2[3];
 	CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
-        CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
-        memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+	if (message != NULL)
+	{
+		CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
+        	CBSha256(hash, 32, hash2);
+        	message->checksum[0] = hash2[0];
+        	message->checksum[1] = hash2[1];
+        	message->checksum[2] = hash2[2];
+        	message->checksum[3] = hash2[3];
+        	CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
+        	memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+	}
+
+	else
+	{
+		CBSha256("", 0, hash);
+		CBSha256(hash, 32, hash2);
+		memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, hash2, 4);
+		CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, 0);
+	}
 }
 
 // send a version message to sockFd
@@ -66,6 +79,30 @@ void versionMessage(int sockFd)
 
 	send(sockFd, header, 24, 0);
 	send(sockFd, message->bytes->sharedData->data + message->bytes->offset, message->bytes->length, 0);
+
+	//Always remember to free your memory!
+	//CBFreeByteArray(message->bytes); this segfaults, maybe CBFreeVersion()
+	//handles it?
+	CBFreeByteArray(ipAddress);
+	CBFreeByteArray(ipAddressKale);
+	CBFreeByteArray(userAgent);
+	CBFreeNetworkAddress(sourceIpAddr);
+	CBFreeNetworkAddress(destIpAddr);
+	CBFreeVersion(version);
+}
+
+void getaddrMessage(int sockFd)
+{
+	char header[24];
+	buildHeaderAndChecksum(header, NULL, HEADER_TYPE_GETADDR);
+	send(sockFd, header, 24, 0);
+}
+
+void verackMessage(int sockFd)
+{
+	char header[24];
+	buildHeaderAndChecksum(header, NULL, HEADER_TYPE_VERACK);
+	send(sockFd, header, 24, 0);
 }
 
 //Read a bitcoin message from a socket
@@ -74,6 +111,11 @@ void readFromSocketNew(int sockFd, char* header, char** payload)
 {
 	//Read the header
 	recv(sockFd, header, 24, 0);
+
+	//getaddr messages don't have a payload, so don't wait for a payload
+	//if we get an addr message
+	if (headerIsType(header, HEADER_TYPE_GETADDR))
+		return;
 
 	//Read the payload
 	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
@@ -85,13 +127,37 @@ void readFromSocketNew(int sockFd, char* header, char** payload)
 		printf("Incomplete read\n");
 }
 
-void testVersionMessage()
+void testVersionMessage(int sockFd)
 {
-	//For the header and payload
 	char header[24];
 	char* payload;
+	versionMessage(sockFd);
+	readFromSocketNew(sockFd, header, &payload);
+	if (headerIsType(header, HEADER_TYPE_VERSION))
+		printf("Version header received\n");
+	free(payload);
+	readFromSocketNew(sockFd, header, &payload);
+	if (headerIsType(header, HEADER_TYPE_VERACK)) {
+        	printf("received verack header\n");
+    	}
 
-	//Connect to UMD Kale
+	free(payload);
+	verackMessage(sockFd);
+}
+
+void testGetaddrMessage(int sockFd)
+{
+	char header[24];
+	char* payload;
+	getaddrMessage(sockFd);
+	readFromSocketNew(sockFd, header, &payload);
+	if (headerIsType(header, HEADER_TYPE_ADDR))
+		printf("addr header received\n");
+	free(payload);
+}
+
+int main()
+{
 	int sockFd;
 	struct sockaddr_in sockAddr;
 	sockFd = socket(PF_INET, SOCK_STREAM, 0);
@@ -105,20 +171,6 @@ void testVersionMessage()
 		exit(0);
 	}
 
-	versionMessage(sockFd);
-	readFromSocketNew(sockFd, header, &payload);
-	if (headerIsType(header, HEADER_TYPE_VERSION))
-		printf("Version header received\n");
-	free(payload);
-	readFromSocketNew(sockFd, header, &payload);
-	if (headerIsType(header, HEADER_TYPE_VERACK)) {
-        	printf("received verack header\n");
-    	}
-
-	free(payload);
-}
-
-int main()
-{
-	testVersionMessage();
+	testVersionMessage(sockFd);
+	testGetaddrMessage(sockFd);
 }
