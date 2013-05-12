@@ -17,9 +17,35 @@ typedef enum{
     CB_MESSAGE_HEADER_CHECKSUM = 20, /**< The checksum of the message */
 } CBMessageHeaderOffsets;
 
+bool headerIsType(char* header, char* type)
+{
+	return !strncmp(header+CB_MESSAGE_HEADER_TYPE, type, 12);
+}
+
+//Should probably be called before sending any bitcoin message
+void buildHeaderAndChecksum(char* header, CBMessage* message, char* type)
+{
+	uint8_t hash[32];
+	uint8_t hash2[32];
+	memcpy(header + CB_MESSAGE_HEADER_TYPE, type, 12);
+	CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
+        CBSha256(hash, 32, hash2);
+        message->checksum[0] = hash2[0];
+        message->checksum[1] = hash2[1];
+        message->checksum[2] = hash2[2];
+        message->checksum[3] = hash2[3];
+	CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
+        CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
+        memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+}
+
 // send a version message to sockFd
+// should probably make this take a CBPeer instead, and the function will
+// make its own socket
 void versionMessage(int sockFd)
 {
+	char header[24];
+
 	// need to send our actual source IP address eventually
 	CBByteArray* ipAddress = CBNewByteArrayWithDataCopy((uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
 
@@ -32,7 +58,6 @@ void versionMessage(int sockFd)
 	int nonce = rand();
 	CBVersion* version = CBNewVersion(versionNumber, CB_SERVICE_FULL_BLOCKS, time(NULL), destIpAddr, sourceIpAddr, nonce, userAgent, 0);
 	CBMessage* message = CBGetMessage(version);
-	char header[24];
 	memcpy(header + CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12);
 	uint32_t len = CBVersionCalculateLength(version);
     	message->bytes = CBNewByteArrayOfSize(len);
@@ -58,34 +83,28 @@ void versionMessage(int sockFd)
 }
 
 //Read a bitcoin message from a socket
-void readFromSocket(int sockFd)
+//Allocates memory for the payload that must be freed by the caller
+void readFromSocketNew(int sockFd, char* header, char** payload)
 {
 	//Read the header
-	char header[24];
 	recv(sockFd, header, 24, 0);
 
 	//Read the payload
 	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
-	char* payload = (char*) malloc(length);
+	*payload = (char*) malloc(length);
 	socklen_t bytesRead = 0;
 	if (length)
-		bytesRead = recv(sockFd, payload, length, 0);
+		bytesRead = recv(sockFd, *payload, length, 0);
 	if (bytesRead != length)
 		printf("Incomplete read\n");
-
-	if (strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12) == 0)
-		printf("Version header received\n");
-
-	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
-        printf("received verack header\n");
-    }
-
-
-	free(payload);
 }
 
 void testVersionMessage()
 {
+	//For the header and payload
+	char header[24];
+	char* payload;
+
 	//Connect to UMD Kale
 	int sockFd;
 	struct sockaddr_in sockAddr;
@@ -97,12 +116,20 @@ void testVersionMessage()
 	if (connect(sockFd, (struct sockaddr*) &sockAddr, sizeof sockAddr) <0)
 	{
 		printf("connect error\n");
-		return 0;
+		exit(0);
 	}
 
 	versionMessage(sockFd);
-	readFromSocket(sockFd);
-	readFromSocket(sockFd);
+	readFromSocketNew(sockFd, header, &payload);
+	if (headerIsType(header, HEADER_TYPE_VERSION))
+		printf("Version header received\n");
+	free(payload);
+	readFromSocketNew(sockFd, header, &payload);
+	if (headerIsType(header, HEADER_TYPE_VERACK)) {
+        	printf("received verack header\n");
+    	}
+
+	free(payload);
 }
 
 int main()
