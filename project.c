@@ -58,26 +58,12 @@ void versionMessage(int sockFd)
 	int nonce = rand();
 	CBVersion* version = CBNewVersion(versionNumber, CB_SERVICE_FULL_BLOCKS, time(NULL), destIpAddr, sourceIpAddr, nonce, userAgent, 0);
 	CBMessage* message = CBGetMessage(version);
-	memcpy(header + CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12);
 	uint32_t len = CBVersionCalculateLength(version);
     	message->bytes = CBNewByteArrayOfSize(len);
     	len = CBVersionSerialise(version, false);
     	if (message->bytes) 
-	{
-        	// Make checksum
-        	uint8_t hash[32];
-        	uint8_t hash2[32];
-        	CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
-        	CBSha256(hash, 32, hash2);
-        	message->checksum[0] = hash2[0];
-        	message->checksum[1] = hash2[1];
-        	message->checksum[2] = hash2[2];
-        	message->checksum[3] = hash2[3];
-    	}
-    	
-	CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
-    	CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
-	memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+		buildHeaderAndChecksum(header, message, HEADER_TYPE_VERSION);
+
 	send(sockFd, header, 24, 0);
 	send(sockFd, message->bytes->sharedData->data + message->bytes->offset, message->bytes->length, 0);
 }
