@@ -59,15 +59,18 @@ void buildHeaderAndChecksum(char* header, CBMessage* message, char* type)
 
 bool validateMessageChecksum(char* header, char* messageData)
 {
+	bool retv;
 	char newHeader[24];
 	CBMessage* message = CBNewMessageByObject();
 	CBByteArray* byteArray = CBNewByteArrayWithData((uint8_t*)messageData, getMessageLengthFromHeader(header));
 	CBInitMessageByData(message, byteArray);
 	buildHeaderAndChecksum(newHeader, message, HEADER_TYPE_VERACK);
-	return (message->checksum[0] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM] &&
+	retv = (message->checksum[0] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM] &&
 		message->checksum[1] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+1] &&
 		message->checksum[2] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+2] &&
 		message->checksum[3] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+3]);
+	CBFreeMessage(message);
+	return retv;
 }
 
 // send a version message to sockFd
@@ -182,6 +185,49 @@ void testGetaddrMessage(int sockFd)
 	free(payload);
 }
 
+//Might change from taking a socket to a CBPeer, or maybe it will take both
+void processMessage(char* header, char* payload, int sockFd)
+{
+	if (!validateMessageChecksum(header, payload))
+	{
+		printf("VALIDATION FAILED\n");
+		return;
+	}
+
+	if (headerIsType(header, HEADER_TYPE_VERSION))
+	{
+		printf("Received version message\n");
+		verackMessage(sockFd);
+	}
+
+	else if (headerIsType(header, HEADER_TYPE_VERACK))
+	{
+		printf("Received verack message\n");
+	}
+
+	else if (headerIsType(header, HEADER_TYPE_ADDR))
+	{
+		printf("Received addr message\n");
+	}
+}
+
+void runTests(int sockFd)
+{
+	char header[24];
+	char* payload;
+	versionMessage(sockFd);
+	readFromSocketNew(sockFd, header, &payload);
+	processMessage(header, payload, sockFd);
+	free(payload);
+	readFromSocketNew(sockFd, header, &payload);
+	processMessage(header, payload, sockFd);
+	free(payload);
+	getaddrMessage(sockFd);
+	readFromSocketNew(sockFd, header, &payload);
+	processMessage(header, payload, sockFd);
+	free(payload);
+}
+
 int main()
 {
 	int sockFd;
@@ -197,6 +243,5 @@ int main()
 		exit(0);
 	}
 
-	testVersionMessage(sockFd);
-	testGetaddrMessage(sockFd);
+	runTests(sockFd);
 }
