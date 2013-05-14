@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <netinet/in.h>
 #include <CBVersion.h>
+#include <CBPeer.h>
 
 //#define NETMAGIC 0xffffffff // mainnet
 //#define NETMAGIC 0x0709110B // testnet
@@ -18,6 +19,63 @@ typedef enum{
     CB_MESSAGE_HEADER_LENGTH = 16, /**< The length of the message */
     CB_MESSAGE_HEADER_CHECKSUM = 20, /**< The checksum of the message */
 } CBMessageHeaderOffsets;
+
+struct PeerNode
+{
+	CBPeer* peer;
+	struct PeerNode* next;
+};
+
+typedef struct PeerNode PeerNode;
+PeerNode* peerList = NULL;
+
+//Insert a peer into the global peerList
+void insertPeer(CBPeer* peer)
+{
+	if (peerList == NULL)
+	{
+		peerList = malloc(sizeof(PeerNode));
+		peerList->peer = peer;
+		peerList->next = NULL;
+	}
+
+	else
+	{
+		PeerNode* current = peerList;
+		while (current->next != NULL)
+		{
+			//Can't insert duplicate peers
+			if (current->peer->socketID == peer->socketID)
+				return;
+
+			current = current->next;
+		}
+
+		if (current->peer->socketID == peer->socketID)
+			return;
+
+		current->next = malloc(sizeof(PeerNode));
+		current->next->peer = peer;
+		current->next->next = NULL;
+	}
+}
+
+//Finds a peer based on socketID in the global peerList, returns NULL if
+//not present.
+//We might need this.
+CBPeer* findPeer(int sockFd)
+{
+	PeerNode* current = peerList;
+	while (current != NULL)
+	{
+		if (current->peer->socketID == sockFd)
+			return current;
+
+		current = current->next;
+	}
+
+	return NULL;
+}
 
 bool headerIsType(char* header, char* type)
 {
