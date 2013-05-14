@@ -24,6 +24,11 @@ bool headerIsType(char* header, char* type)
 	return !strncmp(header+CB_MESSAGE_HEADER_TYPE, type, 12);
 }
 
+unsigned int getMessageLengthFromHeader(char* header)
+{
+	return *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
+}
+
 //Should probably be called before sending any bitcoin message
 void buildHeaderAndChecksum(char* header, CBMessage* message, char* type)
 {
@@ -50,6 +55,19 @@ void buildHeaderAndChecksum(char* header, CBMessage* message, char* type)
 		memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, hash2, 4);
 		CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, 0);
 	}
+}
+
+bool validateMessageChecksum(char* header, char* messageData)
+{
+	char newHeader[24];
+	CBMessage* message = CBNewMessageByObject();
+	CBByteArray* byteArray = CBNewByteArrayWithData((uint8_t*)messageData, getMessageLengthFromHeader(header));
+	CBInitMessageByData(message, byteArray);
+	buildHeaderAndChecksum(newHeader, message, HEADER_TYPE_VERACK);
+	return (message->checksum[0] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM] &&
+		message->checksum[1] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+1] &&
+		message->checksum[2] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+2] &&
+		message->checksum[3] == (uint8_t)header[CB_MESSAGE_HEADER_CHECKSUM+3]);
 }
 
 // send a version message to sockFd
@@ -113,7 +131,7 @@ void readFromSocketNew(int sockFd, char* header, char** payload)
 	recv(sockFd, header, 24, 0);
 
 	//Read the payload
-	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
+	unsigned int length = getMessageLengthFromHeader(header);
 	*payload = (char*) malloc(length);
 	socklen_t bytesRead = 0;
 	if (length)
@@ -130,7 +148,13 @@ void testVersionMessage(int sockFd)
 	versionMessage(sockFd);
 	readFromSocketNew(sockFd, header, &payload);
 	if (headerIsType(header, HEADER_TYPE_VERSION))
+	{
 		printf("Version header received\n");
+		if (validateMessageChecksum(header, payload))
+			printf("validation passed!\n");
+		else printf("validation failed...\n");
+	}
+
 	free(payload);
 	readFromSocketNew(sockFd, header, &payload);
 	if (headerIsType(header, HEADER_TYPE_VERACK)) {
@@ -148,7 +172,13 @@ void testGetaddrMessage(int sockFd)
 	getaddrMessage(sockFd);
 	readFromSocketNew(sockFd, header, &payload);
 	if (headerIsType(header, HEADER_TYPE_ADDR))
+	{
 		printf("addr header received\n");
+		if (validateMessageChecksum(header, payload))
+                	printf("validation passed!\n");
+                else printf("validation failed...\n");
+	}
+
 	free(payload);
 }
 
