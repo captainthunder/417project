@@ -112,19 +112,15 @@ void readFromSocketNew(int sockFd, char* header, char** payload)
 	//Read the header
 	recv(sockFd, header, 24, 0);
 
-	//getaddr messages don't have a payload, so don't wait for a payload
-	//if we get an addr message
-	if (headerIsType(header, HEADER_TYPE_GETADDR))
-		return;
-
 	//Read the payload
 	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
 	*payload = (char*) malloc(length);
 	socklen_t bytesRead = 0;
 	if (length)
-		bytesRead = recv(sockFd, *payload, length, 0);
-	if (bytesRead != length)
-		printf("Incomplete read\n");
+	{
+		while (bytesRead != length)
+			bytesRead += recv(sockFd, (*payload) + bytesRead, length, 0);
+	}
 }
 
 void testVersionMessage(int sockFd)
