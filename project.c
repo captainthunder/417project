@@ -60,8 +60,10 @@ int maxFileDescriptor = 0; //The highest file descriptor across readSockets and 
 bool quit = false;
 unsigned char pingZeros[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 time_t prevTime;
-int listeningSocket = 0;
+int listenSocket = 0;
 struct sockaddr_in localName;
+
+int flag = 1;
 
 void addToSets(int sockFd)
 {
@@ -79,11 +81,17 @@ unsigned short int getPort(NetAddrMessage* netAddr)
 void printNetAddr(NetAddrMessage* netAddr)
 {
 	unsigned short int port = getPort(netAddr);
+	if (port != 0)
 	printf("%u.%u.%u.%u:%u", netAddr->ipAddress[12],
 				 netAddr->ipAddress[13],
 				 netAddr->ipAddress[14],
 				 netAddr->ipAddress[15],
 				 port);
+	else
+	printf("%u.%u.%u.%u", netAddr->ipAddress[12],
+                                 netAddr->ipAddress[13],
+                                 netAddr->ipAddress[14],
+                                 netAddr->ipAddress[15]);
 }
 
 void initPeer(PeerNode* peer, NetAddrMessage* netAddr, bool initiatedByMe)
@@ -96,7 +104,9 @@ void initPeer(PeerNode* peer, NetAddrMessage* netAddr, bool initiatedByMe)
 	peer->gotVersion = false;
 	peer->next = NULL;
 
-	//Create a new non-blocking socket, add it to the read and write sets
+	if (!initiatedByMe)
+		return; //Incoming connection, sockFd already exists
+
 	int sockFd;
 	struct sockaddr_in sockAddr;
 	sockFd = socket(PF_INET, SOCK_STREAM, 0);
@@ -135,7 +145,7 @@ void insertPeer(PeerNode* peer)
 {
 	if (peerLen == 500) //Max number of peers we store is 500
 	{
-		destructPeer(peer);
+	//	destructPeer(peer);
 		return;
 	}
 
@@ -165,21 +175,25 @@ void insertPeer(PeerNode* peer)
 	}
 }
 
-//Finds a peer based on sockFD in the global peerList, returns NULL if
-//not present.
-//We might need this.
-PeerNode* findPeer(int sockFd)
+//TODO: Leaks memory
+void cleanPeerList()
 {
-	PeerNode* current = peerList;
-	while (current != NULL)
+	PeerNode* prevNode = peerList;
+	PeerNode* currentNode = peerList->next;
+	while (currentNode != NULL)
 	{
-		if (current->sockFd == sockFd)
-			return current;
+		if (currentNode->remove)
+		{
+			prevNode->next = currentNode->next;
+			currentNode = currentNode->next;
+		}
 
-		current = current->next;
+		else
+		{
+			currentNode = currentNode->next;
+			prevNode = prevNode->next;
+		}
 	}
-
-	return NULL;
 }
 
 bool headerIsType(char* header, char* type)
@@ -239,12 +253,13 @@ bool validateMessageChecksum(char* header, char* messageData)
 void versionMessage(PeerNode* peer)
 {
 	char header[24];
-
-	// TODO: need to send our actual source IP address eventually
-	CBByteArray* ipAddress = CBNewByteArrayWithDataCopy((uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
+	CBByteArray* ipAddress = CBNewByteArrayWithDataCopy((uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, (localName.sin_addr.s_addr) & 0xFF, 
+														      (localName.sin_addr.s_addr >> 8) & 0xFF,
+														      (localName.sin_addr.s_addr >> 16) & 0xFF,
+														      (localName.sin_addr.s_addr >> 24) & 0xFF}, 16);
 	CBByteArray* ipAddressDest = CBNewByteArrayWithDataCopy(peer->netAddr->ipAddress, 16);
 	CBByteArray* userAgent = CBNewByteArrayFromString("awesomebitcoin", '\00');
-	CBNetworkAddress* sourceIpAddr = CBNewNetworkAddress(0, ipAddress, 0, CB_SERVICE_FULL_BLOCKS, false); //TODO: add the port we're listening on
+	CBNetworkAddress* sourceIpAddr = CBNewNetworkAddress(0, ipAddress, 42990, CB_SERVICE_FULL_BLOCKS, false);
 	CBNetworkAddress* destIpAddr = CBNewNetworkAddress(0, ipAddressDest, getPort(peer->netAddr), CB_SERVICE_FULL_BLOCKS, false);
 	int32_t versionNumber = 70001;
 	int nonce = rand();
@@ -273,16 +288,16 @@ void versionMessage(PeerNode* peer)
 	CBFreeVersion(version);
 }
 
-void pingMessage(PeerNode* peer, unsigned char* nonce)
+void pingpongMessage(PeerNode* peer, unsigned char* nonce, char* type)
 {
 	char header[24];
 	CBByteArray* nonceArray = CBNewByteArrayWithDataCopy(nonce, 8);
 	CBMessage* message = CBNewMessageByObject();
 	CBInitMessageByData(message, nonceArray);
-	buildHeaderAndChecksum(header, message, HEADER_TYPE_PING);
+	buildHeaderAndChecksum(header, message, type);
 	send(peer->sockFd, header, 24, 0);
 	send(peer->sockFd, message->bytes->sharedData->data + message->bytes->offset, message->bytes->length, 0);
-	printf("Sent ping message to ");
+	printf("Sent %s message to ", type);
 	printNetAddr(peer->netAddr);
 	printf("\n");
 	CBFreeMessage(message);
@@ -312,11 +327,12 @@ void verackMessage(PeerNode* peer)
 //Allocates memory for the payload that must be freed by the caller
 //TODO: Program might hang if client goes down after transmitting header
 //but before transmitting payload
-//TODO: This will definitely behave poorly if the peer has closed and there are 0 bytes to be read
-void readFromSocketNew(int sockFd, char* header, char** payload)
+socklen_t readFromSocketNew(int sockFd, char* header, char** payload)
 {
 	//Read the header
-	recv(sockFd, header, 24, 0);
+	socklen_t r = recv(sockFd, header, 24, 0);
+	if (r == 0)
+		return 0;
 
 	//Read the payload
 	unsigned int length = getMessageLengthFromHeader(header);
@@ -327,6 +343,8 @@ void readFromSocketNew(int sockFd, char* header, char** payload)
 		while (bytesRead != length)
 			bytesRead += recv(sockFd, (*payload) + bytesRead, length, 0);
 	}
+
+	return 1;
 }
 
 //Reads the payload of an addr message and creates new peers
@@ -356,14 +374,12 @@ void processAddrMessage(char* payload)
 		//Deletion of both these allocations will be handled by some
 		//function that cleans the peerList
 		netAddr = (NetAddrMessage*)payload;
-		//initPeer(peer, netAddr);
-		//insertPeer(peer);
-		//TODO: Don't insert peers yet because they may be buggy
+		initPeer(peer, netAddr, true);
+		insertPeer(peer);
 		payload += 30;
 	}
 }
 
-//TODO: Tighten up handshake?
 void processMessage(char* header, char* payload, PeerNode* peer)
 {
 	if (!validateMessageChecksum(header, payload))
@@ -378,6 +394,8 @@ void processMessage(char* header, char* payload, PeerNode* peer)
 		printNetAddr(peer->netAddr);
 		printf("\n");
 		peer->gotVersion = true;
+		if (!peer->initiatedByMe)
+			versionMessage(peer);
 		verackMessage(peer);
 	}
 
@@ -409,6 +427,14 @@ void processMessage(char* header, char* payload, PeerNode* peer)
 		processAddrMessage(payload);
 	}
 
+	else if (headerIsType(header, HEADER_TYPE_PING))
+	{
+		printf("Received ping message from ");
+		printNetAddr(peer->netAddr);
+		printf("\n");
+		pingpongMessage(peer, payload, HEADER_TYPE_PONG);
+	}
+
 	else if (headerIsType(header, HEADER_TYPE_PONG))
 	{
 		printf("Received pong message from ");
@@ -431,7 +457,7 @@ void sendMessage(char* buffer)
 		getaddrMessage(peerList);
 
 	else if (strcmp(buffer, "ping") == 0)
-		pingMessage(peerList, pingZeros);
+		pingpongMessage(peerList, pingZeros, HEADER_TYPE_PING);
 
 	else if (strcmp(buffer, "quit") == 0)
 		quit = true;
@@ -442,6 +468,16 @@ void sendMessage(char* buffer)
 //TODO: Write cleanPeerList()
 void mainLoop()
 {
+	//Set up socket for listening
+	listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in localAddr;
+	memset(&localAddr, 0, sizeof(localAddr));
+	localAddr.sin_family = AF_INET;
+	localAddr.sin_addr.s_addr = INADDR_ANY;
+	localAddr.sin_port = htons(42990);
+	bind(listenSocket, (struct sockaddr*) &localAddr, sizeof(localAddr));
+	listen(listenSocket, 500);
+
 	while (!quit)
 	{
 		char buffer[90];
@@ -450,7 +486,7 @@ void mainLoop()
 		if (curTime - prevTime >= 60)
 			prevTime = 0; //Used as a flag to send ping messages
 
-		///Set up fd_sets
+		//Set up fd_sets
 		PeerNode* currentNode = peerList;
 		FD_ZERO(&readSockets);
 		FD_ZERO(&writeSockets);
@@ -461,6 +497,7 @@ void mainLoop()
 		}
 
 		FD_SET(0, &readSockets); //Watch stdin
+		addToSets(listenSocket);
 
 		//Immediately poll which sockets are available for reading and writing
 		struct timeval myAwesomeTimeval;
@@ -476,6 +513,26 @@ void mainLoop()
 				if (FD_ISSET(peerList->sockFd, &writeSockets))
 					sendMessage(buffer);
 			}
+
+			if (FD_ISSET(listenSocket, &readSockets))
+			{
+				socklen_t addrlen;
+				struct sockaddr_in sockAddr;
+				int incomingSocket = accept(listenSocket, (struct sockaddr*) &sockAddr, &addrlen);
+				NetAddrMessage* netAddr = malloc(sizeof(NetAddrMessage));
+				char newNetAddr[30] = {0x0, 0x0, 0x0, 0x0, //Timestamp
+                                			0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, //Network service
+                                			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, (sockAddr.sin_addr.s_addr) & 0xFF, 
+												  (sockAddr.sin_addr.s_addr >> 8) & 0xFF, 
+												  (sockAddr.sin_addr.s_addr >> 16) & 0xFF, 
+												  (sockAddr.sin_addr.s_addr >> 24) & 0xFF,
+                                			0, 0}; //TODO: Does it matter if these are 0?
+				PeerNode* peer = malloc(sizeof(PeerNode));
+				peer->sockFd = incomingSocket;
+				netAddr = (NetAddrMessage*) newNetAddr;
+				initPeer(peer, netAddr, false);
+				insertPeer(peer);
+			}	
 
 			//Sockets are ready
 			PeerNode* currentNode = peerList;
@@ -497,37 +554,47 @@ void mainLoop()
 							printf("Failed to connect to ");
 							printNetAddr(currentNode->netAddr);
 							printf("\n");
+							currentNode = currentNode->next;
 							continue;
 						}
 
-						printf("Connected to ");
-						printNetAddr(currentNode->netAddr);
-						printf("\n");
+						else if (currentNode->initiatedByMe)
+						{
+							printf("Connected to ");
+							printNetAddr(currentNode->netAddr);
+							printf("\n");
 
-						//Make the socket blocking again
-						fcntl(currentNode->sockFd, F_SETFL, currentNode->socketFlags);
+							//Make the socket blocking again
+							fcntl(currentNode->sockFd, F_SETFL, currentNode->socketFlags);
 
-						//If we initiated the connection, we need to start the handshake
-						if (currentNode->initiatedByMe)
 							versionMessage(currentNode);
+						}
+
+						else
+						{
+							printf("Accepted incoming connection from ");
+							printNetAddr(currentNode->netAddr);
+							printf("\n");
+						}
 					}
 
 					if (prevTime == 0)
-						pingMessage(currentNode, pingZeros);
+						pingpongMessage(currentNode, pingZeros, HEADER_TYPE_PING);
 				}
 
 				if (FD_ISSET(currentNode->sockFd, &readSockets))
 				{
 					char header[24];
 					char* payload;
-					readFromSocketNew(currentNode->sockFd, header, &payload);
-					processMessage(header, payload, currentNode);
+					if (readFromSocketNew(currentNode->sockFd, header, &payload) == 0)
+						currentNode->remove = true;
+					else processMessage(header, payload, currentNode);
 				}
 
 				currentNode = currentNode->next;
 			}
 
-			//TODO: Clean peer list here
+			cleanPeerList();
 		}
 
 		if (prevTime == 0)
@@ -537,18 +604,20 @@ void mainLoop()
 
 int main()
 {
-	char result[90];
 	prevTime = time(NULL);
-	listeningSocket = socket(AF_INET, SOCK_DGRAM, 0);
+
+	//Get our IP address
+	listenSocket = socket(AF_INET, SOCK_DGRAM, 0);
 	struct sockaddr_in testAddr;
 	memset(&testAddr, 0, sizeof(testAddr));
 	testAddr.sin_family = AF_INET;
 	testAddr.sin_addr.s_addr = inet_addr("128.8.126.25");
 	testAddr.sin_port = htons(28333);
-	connect(listeningSocket, (struct sockaddr*) &testAddr, sizeof(testAddr));
+	connect(listenSocket, (struct sockaddr*) &testAddr, sizeof(testAddr));
 	socklen_t localNameLen = sizeof(localName);
-	getsockname(listeningSocket, (struct sockaddr*) &localName, &localNameLen);
-	close(listeningSocket);
+	getsockname(listenSocket, (struct sockaddr*) &localName, &localNameLen);
+	close(listenSocket);
+	
 	//Connect to Kale
 	char netAddrKale[30] = {0x0, 0x0, 0x0, 0x0, //Timestamp
 				0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, //Network service
